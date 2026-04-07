@@ -4,6 +4,10 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 
+'''
+Builds a graph from random 2D points, convert the graph into Laplacian-based matrices. Optionally normalizes or shift those matrices. Compute eigenvalues/eigenvectors for spectral analysis.
+'''
+
 def rgg_knn_graph(
     n: int = 128,
     k: int = 8,
