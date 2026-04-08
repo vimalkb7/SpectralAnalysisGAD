@@ -277,7 +277,21 @@ def run_real_pretrain_check(args, scheduler_name: str) -> None:
         intel_coords_path=args.intel_coords_path,
         intel_value_col=args.intel_value_col,
     )
-    X0 = bundle.train.x.numpy().astype(np.float64)
+    # X0 = bundle.train.x.numpy().astype(np.float64)
+    X0_full = bundle.train.x.numpy().astype(np.float64)
+
+    num_total_train = X0_full.shape[0]
+    num_requested = int(getattr(args, 'num_train_samples_for_checks', 0) or 0)
+
+    if num_requested > 0 and num_requested < num_total_train:
+        rng_subset = np.random.default_rng(args.seed + 999)
+        subset_idx = rng_subset.choice(num_total_train, size=num_requested, replace=False)
+        subset_idx = np.sort(subset_idx)
+        X0 = X0_full[subset_idx]
+    else:
+        subset_idx = np.arange(num_total_train)
+        X0 = X0_full
+
     Lg = bundle.laplacian.astype(np.float64)
     W = bundle.adjacency.astype(np.float64)
     lam_gamma, V = eigh_sym(Lg)
@@ -358,7 +372,9 @@ def run_real_pretrain_check(args, scheduler_name: str) -> None:
         'scheduler': scheduler_name,
         'dataset': bundle.name,
         'num_nodes': int(X0.shape[1]),
-        'num_train_samples': int(X0.shape[0]),
+        'num_train_samples_total': int(num_total_train),
+        'num_train_samples_used': int(X0.shape[0]),
+        'subsampled_for_checks': bool(X0.shape[0] != num_total_train),
         'terminal_retained_signal_energy': float(retained[-1]),
         'terminal_max_abs_a': float(np.max(np.abs(a[-1]))),
         'terminal_mean_nu': float(np.mean(nu[-1])),

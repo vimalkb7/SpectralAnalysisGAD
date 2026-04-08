@@ -30,11 +30,13 @@ def main() -> None:
     p.add_argument('--r_max', type=float, default=1e4)
     p.add_argument('--r_min', type=float, default=1e-3)
     p.add_argument('--num_modes_each_end', type=int, default=5)
+    p.add_argument('--scheduler_name', type=str, default='FCPS', choices=['FCPS', 'MAS-SNR'])
+    p.add_argument('--num_train_samples_for_checks', type=int, default=500, help='0 means use all training samples; otherwise randomly subsample this many training snapshots for pretraining diagnostics.')
     p.add_argument('--plot_all_modes', action='store_true')
     args = p.parse_args()
 
     print(json.dumps(vars(args), indent=2, sort_keys=True, default=str))
-    run_real_pretrain_check(args, scheduler_name='FCPS')
+    run_real_pretrain_check(args, scheduler_name=args.scheduler_name)
 
 
 if __name__ == '__main__':
