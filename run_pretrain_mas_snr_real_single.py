@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 
 from pretrain_real_common import run_real_pretrain_check
 
@@ -21,7 +22,7 @@ def main() -> None:
     p.add_argument('--gamma', type=float, default=1e-3)
     p.add_argument('--sigma', type=float, default=1.0)
     p.add_argument('--T', type=float, default=1.0)
-    p.add_argument('--num_t', type=int, default=300)
+    p.add_argument('--num_t', type=int, default=500)
     p.add_argument('--num_eval_times', type=int, default=9)
     p.add_argument('--fcps_c0', type=float, default=2300.0)
     p.add_argument('--fcps_cmin', type=float, default=0.1)
@@ -29,6 +30,8 @@ def main() -> None:
     p.add_argument('--r_max', type=float, default=1e4)
     p.add_argument('--r_min', type=float, default=1e-3)
     p.add_argument('--num_modes_each_end', type=int, default=5)
+    p.add_argument('--scheduler_name', type=str, default='FCPS', choices=['FCPS', 'MAS-SNR'])
+    p.add_argument('--num_train_samples_for_checks', type=int, default=500, help='0 means use all training samples; otherwise randomly subsample this many training snapshots for pretraining diagnostics.')
     p.add_argument('--plot_all_modes', action='store_true')
     args = p.parse_args()
     run_real_pretrain_check(args, scheduler_name='MAS-SNR')
