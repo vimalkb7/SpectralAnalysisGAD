@@ -40,7 +40,11 @@ class GenericScoreMixin:
         xhat = self.forward(xt, V, t)
         xt_tilde = xt @ V
         xhat_tilde = xhat @ V
-        return (a * xhat_tilde - xt_tilde) / (nu + 1e-12)
+        # return (a * xhat_tilde - xt_tilde) / (nu + 1e-12)
+        denom = torch.clamp(nu, min=1e-4)
+        score = (a * xhat_tilde - xt_tilde) / denom
+        score = torch.clamp(score, min=-1e4, max=1e4)
+        return score
 
 
 

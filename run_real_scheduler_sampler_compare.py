@@ -63,6 +63,7 @@ def main() -> None:
     p.add_argument('--weight_decay', type=float, default=0.0)
     p.add_argument('--batch_size', type=int, default=128)
     p.add_argument('--num_epochs', type=int, default=40)
+    p.add_argument("--train_loss", type=str, default="x0", choices=["x0", "dsm"], help="Training objective: plain x0 reconstruction loss or DSM loss through x0 prediction.")
     p.add_argument('--grad_clip_norm', type=float, default=1.0)
     p.add_argument('--val_every_epochs', type=int, default=5)
     p.add_argument('--val_method', type=str, default='em', choices=['em', 'heun', 'ddpm', 'ddim'])
@@ -85,6 +86,7 @@ def main() -> None:
     p.add_argument('--lr_decay_factor', type=float, default=0.5)
     p.add_argument('--lr_patience_validations', type=int, default=2)
     p.add_argument('--lr_threshold', type=float, default=1e-4)
+    p.add_argument("--train_t_min", type=float, default=1e-2)
     args = p.parse_args()
 
     print(json.dumps(vars(args), indent=2, sort_keys=True, default=str))

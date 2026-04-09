@@ -74,6 +74,29 @@ def sample_forward_pairwise_torch(
     return xt_tilde @ V.T
 
 
+def spectral_x0_loss(
+    model: torch.nn.Module,
+    xt: torch.Tensor,
+    x0: torch.Tensor,
+    V: torch.Tensor,
+    t: torch.Tensor,
+) -> torch.Tensor:
+    x0_hat = model(xt, V, t)
+    x0_hat_tilde = x0_hat @ V
+    x0_tilde = x0 @ V
+    return torch.mean((x0_hat_tilde - x0_tilde) ** 2)
+
+
+def node_x0_loss(
+    model: torch.nn.Module,
+    xt: torch.Tensor,
+    x0: torch.Tensor,
+    V: torch.Tensor,
+    t: torch.Tensor,
+) -> torch.Tensor:
+    x0_hat = model(xt, V, t)
+    return torch.mean((x0_hat - x0) ** 2)
+
 
 def spectral_dsm_loss(
     model: torch.nn.Module,
@@ -88,7 +111,7 @@ def spectral_dsm_loss(
     x0_tilde = x0 @ V
     x0_hat = model(xt, V, t)
     x0_hat_tilde = x0_hat @ V
-    denom = torch.clamp(nu, min=1e-12)
+    denom = torch.clamp(nu, min=1e-4)
     s_theta = (a * x0_hat_tilde - xt_tilde) / denom
     s_star = (a * x0_tilde - xt_tilde) / denom
     return torch.mean((s_theta - s_star) ** 2)
@@ -230,6 +253,14 @@ def run_full_reverse_validation(
             init_mode=args.sampler_init_mode,
         )
     X_gen_np = X_gen.detach().cpu().numpy()
+    if not np.isfinite(X_gen_np).all():
+        nan_count = int(np.isnan(X_gen_np).sum())
+        inf_count = int(np.isinf(X_gen_np).sum())
+        max_abs = float(np.nanmax(np.abs(np.nan_to_num(X_gen_np, nan=0.0, posinf=0.0, neginf=0.0))))
+        raise FloatingPointError(
+            f"Non-finite generated samples at epoch {epoch}: "
+            f"nan_count={nan_count}, inf_count={inf_count}, max_abs={max_abs:.6e}"
+        )
     metrics = summarize_generation_metrics(
         X_gen_np,
         X_ref_eval_np,
@@ -321,7 +352,29 @@ def train_one_scheduler(
             t = torch.rand((xb.shape[0],), generator=gen, device=X_train.device, dtype=X_train.dtype) * args.T
             pars = channel_params_for_times_torch(schedule_name, schedule_obj, lam_gamma, s_k, args.sigma, t)
             xt = sample_forward_pairwise_torch(xb, V, pars["a"], pars["nu"], generator=gen)
-            loss = spectral_dsm_loss(model, xt=xt, x0=xb, V=V, t=t, a=pars["a"], nu=pars["nu"])
+            # loss = spectral_dsm_loss(model, xt=xt, x0=xb, V=V, t=t, a=pars["a"], nu=pars["nu"])
+            u = torch.rand((xb.shape[0],), generator=gen, device=X_train.device, dtype=X_train.dtype)
+            t = args.train_t_min + (args.T - args.train_t_min) * u
+            if args.train_loss == "x0":
+                loss = spectral_x0_loss(
+                    model,
+                    xt=xt,
+                    x0=xb,
+                    V=V,
+                    t=t,
+                )
+            elif args.train_loss == "dsm":
+                loss = spectral_dsm_loss(
+                    model,
+                    xt=xt,
+                    x0=xb,
+                    V=V,
+                    t=t,
+                    a=pars["a"],
+                    nu=pars["nu"],
+                )
+            else:
+                raise ValueError(f"Unknown train_loss: {args.train_loss}")
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             if args.grad_clip_norm is not None and args.grad_clip_norm > 0:
@@ -458,6 +511,7 @@ def main() -> None:
     p.add_argument("--weight_decay", type=float, default=0.0)
     p.add_argument("--batch_size", type=int, default=128)
     p.add_argument("--num_epochs", type=int, default=40)
+    p.add_argument("--train_loss", type=str, default="x0", choices=["x0", "dsm"], help="Training objective: plain x0 reconstruction loss or DSM loss through x0 prediction.")
     p.add_argument("--grad_clip_norm", type=float, default=1.0)
     p.add_argument("--val_every_epochs", type=int, default=5)
     p.add_argument("--val_method", type=str, default="em", choices=["em", "heun", "ddpm", "ddim"])
@@ -480,6 +534,7 @@ def main() -> None:
     p.add_argument("--lr_decay_factor", type=float, default=0.5)
     p.add_argument("--lr_patience_validations", type=int, default=2)
     p.add_argument("--lr_threshold", type=float, default=1e-4)
+    p.add_argument("--train_t_min", type=float, default=1e-2)
     args = p.parse_args()
 
     print("\n=== Parsed arguments ===")
