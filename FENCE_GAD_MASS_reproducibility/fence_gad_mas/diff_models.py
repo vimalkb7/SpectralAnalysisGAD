@@ -1,0 +1,161 @@
+import math
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+def get_torch_trans(heads=8, layers=1, channels=64):
+    encoder_layer = nn.TransformerEncoderLayer(
+        d_model=channels, nhead=heads, dim_feedforward=64, activation="gelu"
+    )
+    return nn.TransformerEncoder(encoder_layer, num_layers=layers)
+
+
+def Conv1d_with_init(in_channels, out_channels, kernel_size):
+    layer = nn.Conv1d(in_channels, out_channels, kernel_size)
+    nn.init.kaiming_normal_(layer.weight)
+    return layer
+
+
+class ContinuousDiffusionEmbedding(nn.Module):
+    def __init__(self, embedding_dim=128, projection_dim=None, max_frequency=1e4):
+        super().__init__()
+        embedding_dim = int(embedding_dim)
+        if embedding_dim % 2 != 0:
+            raise ValueError("diffusion_embedding_dim must be even")
+        if projection_dim is None:
+            projection_dim = embedding_dim
+        half = embedding_dim // 2
+        frequencies = torch.exp(torch.linspace(0.0, math.log(float(max_frequency)), half))
+        self.register_buffer("frequencies", frequencies, persistent=False)
+        self.projection1 = nn.Linear(embedding_dim, projection_dim)
+        self.projection2 = nn.Linear(projection_dim, projection_dim)
+
+    def forward(self, diffusion_coordinate):
+        z = diffusion_coordinate.to(dtype=self.frequencies.dtype).reshape(-1, 1)
+        table = math.pi * z * self.frequencies[None, :]
+        x = torch.cat([torch.sin(table), torch.cos(table)], dim=1)
+        x = self.projection1(x)
+        x = F.silu(x)
+        x = self.projection2(x)
+        x = F.silu(x)
+        return x
+
+
+DiffusionEmbedding = ContinuousDiffusionEmbedding
+
+
+class diff(nn.Module):
+    def __init__(self, config, inputdim=2):
+        super().__init__()
+        self.channels = int(config["channels"])
+
+        self.diffusion_embedding = ContinuousDiffusionEmbedding(
+            embedding_dim=int(config["diffusion_embedding_dim"]),
+            max_frequency=float(config.get("continuous_embedding_max_frequency", 1e4)),
+        )
+
+        self.input_projection = Conv1d_with_init(inputdim, self.channels, 1)
+        self.output_projection1 = Conv1d_with_init(self.channels, self.channels, 1)
+        self.output_projection2 = Conv1d_with_init(self.channels, 1, 1)
+        nn.init.zeros_(self.output_projection2.weight)
+
+        self.residual_layers = nn.ModuleList(
+            [
+                ResidualBlock(
+                    side_dim=int(config["side_dim"]),
+                    channels=self.channels,
+                    diffusion_embedding_dim=int(config["diffusion_embedding_dim"]),
+                    nheads=int(config["nheads"]),
+                )
+                for _ in range(int(config["layers"]))
+            ]
+        )
+
+    def forward(self, x, cond_info, diffusion_coordinate):
+        B, inputdim, K, L = x.shape
+        x = x.reshape(B, inputdim, K * L)
+        x = self.input_projection(x)
+        x = F.relu(x)
+        x = x.reshape(B, self.channels, K, L)
+
+        diffusion_emb = self.diffusion_embedding(diffusion_coordinate)
+
+        skip = []
+        attn_weights = None
+        for layer in self.residual_layers:
+            x, skip_connection, attn_weights = layer(x, cond_info, diffusion_emb)
+            skip.append(skip_connection)
+
+        x = torch.sum(torch.stack(skip), dim=0) / math.sqrt(len(self.residual_layers))
+        x = x.reshape(B, self.channels, K * L)
+        x = self.output_projection1(x)
+        x = F.relu(x)
+        x = self.output_projection2(x)
+        x = x.reshape(B, K, L)
+
+        return x, attn_weights
+
+
+class ResidualBlock(nn.Module):
+    def __init__(self, side_dim, channels, diffusion_embedding_dim, nheads):
+        super().__init__()
+        self.diffusion_projection = nn.Linear(diffusion_embedding_dim, channels)
+        self.cond_projection = Conv1d_with_init(side_dim, 2 * channels, 1)
+        self.mid_projection = Conv1d_with_init(channels, 2 * channels, 1)
+        self.output_projection = Conv1d_with_init(channels, 2 * channels, 1)
+
+        self.feature_attn = nn.MultiheadAttention(channels, nheads, batch_first=True)
+        self.feature_ffn = nn.Sequential(
+            nn.Linear(channels, channels * 4),
+            nn.GELU(),
+            nn.Linear(channels * 4, channels),
+        )
+        self.feature_norm1 = nn.LayerNorm(channels)
+        self.feature_norm2 = nn.LayerNorm(channels)
+        self.time_layer = get_torch_trans(heads=nheads, layers=1, channels=channels)
+
+    def forward_time(self, y, base_shape):
+        B, channel, K, L = base_shape
+        if L == 1:
+            return y
+        y = y.reshape(B, channel, K, L).permute(0, 2, 1, 3).reshape(B * K, channel, L)
+        y = self.time_layer(y.permute(2, 0, 1)).permute(1, 2, 0)
+        y = y.reshape(B, K, channel, L).permute(0, 2, 1, 3).reshape(B, channel, K * L)
+        return y
+
+    def forward_feature(self, y, base_shape):
+        B, channel, K, L = base_shape
+        if K == 1:
+            return y, None
+        y = y.reshape(B, channel, K, L).permute(0, 3, 2, 1).reshape(B * L, K, channel)
+        y_norm = self.feature_norm1(y)
+        attn_output, attn_weights = self.feature_attn(y_norm, y_norm, y_norm, need_weights=True)
+        y = y + attn_output
+        ffn_output = self.feature_ffn(self.feature_norm2(y))
+        y = y + ffn_output
+        y = y.reshape(B, L, K, channel).permute(0, 3, 2, 1).reshape(B, channel, K * L)
+        attn_weights = attn_weights.view(B, L, K, K).mean(dim=1)
+        return y, attn_weights
+
+    def forward(self, x, cond_info, diffusion_emb):
+        B, channel, K, L = x.shape
+        base_shape = x.shape
+        x = x.reshape(B, channel, K * L)
+        diffusion_emb = self.diffusion_projection(diffusion_emb).unsqueeze(-1)
+        y = x + diffusion_emb
+        y = self.forward_time(y, base_shape)
+        y, attn_weights = self.forward_feature(y, base_shape)
+        y = self.mid_projection(y)
+        _, cond_dim, _, _ = cond_info.shape
+        cond_info = cond_info.reshape(B, cond_dim, K * L)
+        cond_info = self.cond_projection(cond_info)
+        y = y + cond_info
+        gate, filter = torch.chunk(y, 2, dim=1)
+        y = torch.sigmoid(gate) * torch.tanh(filter)
+        y = self.output_projection(y)
+        residual, skip = torch.chunk(y, 2, dim=1)
+        x = x.reshape(base_shape)
+        residual = residual.reshape(base_shape)
+        skip = skip.reshape(base_shape)
+        return (x + residual) / math.sqrt(2.0), skip, attn_weights
